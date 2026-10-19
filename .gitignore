@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+server/data/
+
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# 敏感信息（口令/证书等切勿提交）
+*.p12
+*.mobileprovision
+.env
