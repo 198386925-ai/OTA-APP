@@ -1,4 +1,6 @@
-// MARK: LUIYo — local IPA delivery for Apple's installer, using a remote HTTPS manifest.
+// MARK: LUIYo — local delivery for Apple's installer: the signed
+// IPA and its OTA manifest are both served from this device's
+// loopback interface, under per-session random routes.
 import Foundation
 import Network
 
@@ -6,6 +8,9 @@ final class RGLocalUpdateServer: @unchecked Sendable {
     private let fileURL: URL
     private let size: UInt64
     private let route = "/" + UUID().uuidString + "/LUIYo.ipa"
+    private let manifestRoute = "/" + UUID().uuidString + "/manifest.plist"
+    private var manifestData: Data?
+    private var baseURL: URL?
     private let queue = DispatchQueue(label: "LUIYo.Update.Loopback")
     private let listener: NWListener
     private var connections: [ObjectIdentifier: NWConnection] = [:]
@@ -36,8 +41,9 @@ final class RGLocalUpdateServer: @unchecked Sendable {
                     guard let self else { return }
                     switch state {
                     case .ready:
-                        guard let port = self.listener.port, let url = URL(string: "http://127.0.0.1:\(port.rawValue)" + self.route) else { self.finishStart(.failure(RGUpdateError.network)); return }
-                        self.finishStart(.success(url))
+                        guard let port = self.listener.port, let base = URL(string: "http://127.0.0.1:\(port.rawValue)") else { self.finishStart(.failure(RGUpdateError.network)); return }
+                        self.baseURL = base
+                        self.finishStart(.success(URL(string: base.absoluteString + self.route)!))
                     case .failed:
                         self.finishStart(.failure(RGUpdateError.network)); self.stopOnQueue()
                     default: break
@@ -65,6 +71,16 @@ final class RGLocalUpdateServer: @unchecked Sendable {
                 self.timeout = timeout
                 self.queue.asyncAfter(deadline: .now() + 300, execute: timeout)
             }
+        }
+    }
+
+    /// Serves the OTA manifest next to the package and returns its
+    /// URL. Call after start() has delivered the package URL.
+    func serveManifest(_ data: Data) throws -> URL {
+        return try queue.sync {
+            guard !stopped, let baseURL else { throw RGUpdateError.network }
+            manifestData = data
+            return URL(string: baseURL.absoluteString + manifestRoute)!
         }
     }
 
@@ -100,10 +116,22 @@ final class RGLocalUpdateServer: @unchecked Sendable {
         guard let text = String(data: request, encoding: .utf8) else { connection.cancel(); return }
         let lines = text.components(separatedBy: "\r\n")
         let parts = (lines.first ?? "").split(separator: " ")
-        guard parts.count == 3, parts[1] == route, parts[0] == "GET" || parts[0] == "HEAD" else {
+        guard parts.count == 3, parts[0] == "GET" || parts[0] == "HEAD" else {
             sendError(connection, status: "404 Not Found"); return
         }
         let method = String(parts[0])
+        if String(parts[1]) == manifestRoute {
+            guard let manifestData else { sendError(connection, status: "404 Not Found"); return }
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/plist\r\nContent-Length: \(manifestData.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
+            connection.send(content: Data(header.utf8), completion: .contentProcessed { _ in
+                if method == "HEAD" { connection.cancel(); return }
+                connection.send(content: manifestData, completion: .contentProcessed { _ in connection.cancel() })
+            })
+            return
+        }
+        guard String(parts[1]) == route else {
+            sendError(connection, status: "404 Not Found"); return
+        }
         var lower: UInt64 = 0, upper = size - 1, partial = false
         let ranges = lines.dropFirst().filter { $0.lowercased().hasPrefix("range:") }
         guard ranges.count <= 1 else { sendError(connection, status: "416 Range Not Satisfiable"); return }
