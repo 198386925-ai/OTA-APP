@@ -2,9 +2,7 @@
 import Foundation
 import UIKit
 import Combine
-import SwiftSignalKit
 import RGUpdateSigner
-import RGStrings
 
 // MARK: LUIYo — configurable, private update source.
 // The update client no longer has to hard-code the public GitHub repository.
@@ -31,7 +29,7 @@ public func rgUpdateAllowedHost(_ host: String) -> Bool {
     return false
 }
 
-public let rgAppUpdatePrompt = ValuePromise<RGUpdatePrompt?>(nil, ignoreRepeated: true)
+public let rgAppUpdatePrompt = RGValuePromise<RGUpdatePrompt?>(nil, ignoreRepeated: true)
 
 private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate, @unchecked Sendable {
     let service: URL?
@@ -41,7 +39,7 @@ private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, U
         guard let url = request.url, RGUpdateRelease.validHTTPS(url) else { completionHandler(nil); return }
         if let service {
             // Never redirect a signed package or upload credentials to another origin.
-            guard RGLCSignNode.trustedURL(url), RGLCSignNode.trustedURL(service) else { completionHandler(nil); return }
+            guard url.scheme == service.scheme, url.host == service.host, url.port == service.port else { completionHandler(nil); return }
         } else {
             let host = url.host?.lowercased() ?? ""
             guard rgUpdateAllowedHost(host) else { completionHandler(nil); return }
@@ -93,9 +91,6 @@ private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, U
             else { automaticallyPrepare = false; rgAppUpdatePrompt.set(nil) }
         }
     }
-    @Published public var preferredNode: String { didSet { UserDefaults.standard.set(preferredNode, forKey: "LUIYo.AppUpdate.LCSignNode") } }
-    @Published public private(set) var availableNodes = RGLCSignNode.fallback
-    @Published public private(set) var activeNode = ""
     @Published public var automaticallyPrepare: Bool {
         didSet {
             UserDefaults.standard.set(automaticallyPrepare, forKey: "LUIYo.AppUpdate.Prepare")
@@ -108,7 +103,7 @@ private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, U
             guard oldValue != installationMethod else { return }
             UserDefaults.standard.set(installationMethod.rawValue, forKey: "LUIYo.AppUpdate.InstallationMethod")
             operationId = nil; operation?.cancel(); stopInstallation()
-            preparedIPA = nil; failure = nil; activeNode = ""
+            preparedIPA = nil; failure = nil
             didRestoreCache = false
             stage = release == nil ? .idle : .available
             activate()
@@ -177,7 +172,6 @@ private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, U
         self.automaticallyCheck = automaticCheck
         self.automaticallyPrepare = automaticCheck && defaults.bool(forKey: "LUIYo.AppUpdate.Prepare")
         self.automaticallyExitAfterInstalling = defaults.bool(forKey: "LUIYo.AppUpdate.ExitAfterInstalling")
-        self.preferredNode = defaults.string(forKey: "LUIYo.AppUpdate.LCSignNode") ?? ""
         self.certificateName = RGUpdateIdentity.load()?.displayName ?? ""
         self.savedProfileCount = (try? JSONDecoder().decode([Data].self, from: RGUpdateKeychain.read("profiles") ?? Data("[]".utf8)).count) ?? 0
         self.directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("LUIYoUpdateOperations", isDirectory: true)
@@ -618,47 +612,17 @@ private final class RGUpdateNetworkDelegate: NSObject, URLSessionTaskDelegate, U
                 } }
                 let packageURL = try await server.start()
                 try Task.checkCancellation()
-                let delegate = RGUpdateNetworkDelegate(service: URL(string: "https://support.lcsignx.com")!, maximumSize: 1024 * 1024)
-                let session = makeSession(delegate)
-                defer { session.invalidateAndCancel() }
-                let configuration = URL(string: "https://support.lcsignx.com/install/services")!
-                if let (data, response) = try? await session.data(from: configuration), (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 1024 * 1024,
-                   let nodes = try? RGLCSignNode.parse(data), !nodes.isEmpty { availableNodes = nodes }
-                let nodes = availableNodes.sorted { a, b in
-                    if a.code == preferredNode { return b.code != preferredNode }
-                    if b.code == preferredNode { return false }
-                    return a.priority < b.priority
-                }
-                let body = try RGLCSignNode.manifestRequest(packageURL: packageURL, bundleId: Bundle.main.bundleIdentifier ?? "", build: String(release.build))
-                var installationURL: URL?
-                for node in nodes {
-                    try Task.checkCancellation()
-                    activeNode = node.name
-                    do {
-                        var request = URLRequest(url: node.baseURL.appendingPathComponent("ota/manifest"))
-                        request.timeoutInterval = 12
-                        request.httpMethod = "POST"
-                        request.httpBody = body
-                        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        let (data, response) = try await session.data(for: request)
-                        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 1024 * 1024 else { throw RGUpdateError.network }
-                        struct ManifestResponse: Decodable { let token: String }
-                        let hosted = try JSONDecoder().decode(ManifestResponse.self, from: data)
-                        // LCSign also constructs the URL on the chosen node. The API may
-                        // advertise support.lcsignx.com, whose token database is separate.
-                        let manifestURL = try node.manifestURL(token: hosted.token)
-                        let url = try RGLCSignNode.installationURL(manifest: manifestURL)
-                        let (manifestData, manifestResponse) = try await session.data(from: manifestURL)
-                        guard (manifestResponse as? HTTPURLResponse)?.statusCode == 200, manifestData.count <= 1024 * 1024 else { throw RGUpdateError.invalidManifest }
-                        try RGLCSignNode.validateManifest(manifestData, bundleId: Bundle.main.bundleIdentifier ?? "", build: String(release.build), packageURL: packageURL)
-                        installationURL = url
-                        break
-                    } catch {
-                        try Task.checkCancellation()
-                    }
-                }
-                try Task.checkCancellation()
-                guard operationId == id, let installationURL else { throw RGUpdateError.network }
+                guard operationId == id else { return }
+                // The manifest is built on device and served by the
+                // same loopback server as the package — installation
+                // never depends on a third-party manifest service.
+                let bundleId = Bundle.main.bundleIdentifier ?? ""
+                let appTitle = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                    ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "LUIYo"
+                let manifest = try RGInstallManifest.make(bundleId: bundleId, build: String(release.build), title: appTitle, packageURL: packageURL)
+                try RGInstallManifest.validate(manifest, bundleId: bundleId, build: String(release.build), packageURL: packageURL)
+                let manifestURL = try server.serveManifest(manifest)
+                let installationURL = try RGInstallManifest.installationURL(manifestURL: manifestURL)
                 UIApplication.shared.open(installationURL, options: [:]) { opened in
                     Task { @MainActor in
                         guard self.operationId == id else { return }
