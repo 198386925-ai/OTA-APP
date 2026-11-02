@@ -1,23 +1,20 @@
-// MARK: LUIYo — use the configured application protocol, never a web or wallet protocol.
+// MARK: LUIYo — deep link into the app's own update settings,
+// built from the URL schemes the host app actually registered.
 import Foundation
-import BuildConfig
 
 enum RGUpdateSettingsLink {
-    static func url(appSpecificScheme: String, registeredSchemes: [String]) -> URL {
-        let reserved: Set<String> = ["tonsite", "ton", "tc", "http", "https", "file", "telegram"]
-        let lower = appSpecificScheme.lowercased()
-        let valid = appSpecificScheme.range(of: "^[A-Za-z][A-Za-z0-9+.-]*$", options: .regularExpression) != nil
-        let scheme = valid && !reserved.contains(lower) && registeredSchemes.contains(where: { $0.lowercased() == lower }) ? appSpecificScheme : "tg"
+    static var current: URL {
+        let reserved: Set<String> = ["http", "https", "file"]
+        let schemes = (Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] ?? [])
+            .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+        let scheme = schemes.first { candidate in
+            let lower = candidate.lowercased()
+            return !reserved.contains(lower)
+                && candidate.range(of: "^[A-Za-z][A-Za-z0-9+.-]*$", options: .regularExpression) != nil
+        } ?? "luiyo"
         var components = URLComponents()
         components.scheme = scheme; components.host = "rg"; components.path = "/settings"
         components.queryItems = [URLQueryItem(name: "page", value: "updates")]
         return components.url!
-    }
-
-    static var current: URL {
-        let schemes = (Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] ?? [])
-            .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
-        let config = BuildConfig(baseAppBundleId: Bundle.main.bundleIdentifier ?? "")
-        return url(appSpecificScheme: config.appSpecificUrlScheme, registeredSchemes: schemes)
     }
 }
