@@ -2,8 +2,6 @@
 import Foundation
 import UIKit
 import ActivityKit
-import RGUpdateActivity
-import RGStrings
 
 @MainActor final class RGUpdateLiveActivity {
     struct Snapshot: Equatable {
@@ -56,10 +54,10 @@ import RGStrings
         guard token == generation, !Task.isCancelled else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         let labels = snapshot.language
-        let state = RGUpdateActivityAttributes.ContentState(phase: snapshot.phase, label: snapshot.labelKey.i18n(labels), action: "AppUpdate.ActivityOpen".i18n(labels), staleLabel: "AppUpdate.ActivityStale".i18n(labels), downloaded: snapshot.downloaded, total: release.size)
+        let state = RGUpdateActivityAttributes.ContentState(phase: snapshot.phase, label: RGUpdateStrings.string(snapshot.labelKey, language: labels), action: RGUpdateStrings.string("AppUpdate.ActivityOpen", language: labels), staleLabel: RGUpdateStrings.string("AppUpdate.ActivityStale", language: labels), downloaded: snapshot.downloaded, total: release.size)
         var activity = activities.first { $0.attributes.build == release.build && $0.attributes.updateURL == updateURL && $0.activityState != .ended && $0.activityState != .dismissed }
         if activity == nil, snapshot.mayStart, UIApplication.shared.applicationState == .active, rejectedBuild != release.build {
-            let attributes = RGUpdateActivityAttributes(build: release.build, version: release.version, title: "AppUpdate.Title".i18n(labels), updateURL: updateURL)
+            let attributes = RGUpdateActivityAttributes(build: release.build, version: release.version, title: RGUpdateStrings.string("AppUpdate.Title", language: labels), updateURL: updateURL)
             do {
                 if #available(iOS 16.2, *) { activity = try Activity.request(attributes: attributes, content: ActivityContent(state: state, staleDate: staleDate(snapshot)), pushType: nil) }
                 else { activity = try Activity.request(attributes: attributes, contentState: state, pushType: nil) }
